@@ -1,0 +1,5 @@
+{
+  "name": "IT Career Simulator",
+  "description": "An RPG-style game where you navigate the life of an IT professional. Level up your skills, make critical career and life decisions, build your personal brand, and climb the corporate ladder from a junior developer to a tech lead. This simulator uses AI to generate dynamic events, creating a unique experience every time you play.",
+  "requestFramePermissions": []
+}
