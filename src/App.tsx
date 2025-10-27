@@ -1,6 +1,7 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { produce } from 'immer';
-import { INITIAL_GAME_STATE, EVENT_CHANCE, JOB_TIERS, PERSONAL_ACTIVITIES, EDUCATION_OPTIONS, HOBBIES } from './constants';
+import { INITIAL_GAME_STATE, EVENT_CHANCE, JOB_TIERS, PERSONAL_ACTIVITIES, EDUCATION_OPTIONS, HOBBIES, AI_EVENT_CHANCE_VS_STATIC } from './constants';
+import { STATIC_EVENTS } from './staticEvents';
 import type { GameState, GameEventChoice, Perk, Job, Trait, Activity, Education, Hobby } from './types';
 import { generateGameEvent } from './services/geminiService';
 import StatDisplay from './components/StatDisplay';
@@ -27,7 +28,7 @@ const PERK_DETAILS: { [key in NonNullable<Perk>]: Trait } = {
     rich: { id: 'perk_rich', name: 'Boháč (High Roller)', description: 'Earn a dynamic weekly salary bonus.', type: 'positive' },
     fortunate: { id: 'perk_fortunate', name: 'Štístko (Fortunate)', description: 'High starting luck, but -20% passive XP gain.', type: 'positive' },
     influencer: { id: 'perk_influencer', name: 'Cutiepie (Influencer)', description: '+50% Personal Brand from events.', type: 'positive' },
-    testing: { id: 'perk_testing', name: 'Testovací režim', description: 'Hra je o 200 % rychlejší a události jsou dvakrát častější.', type: 'positive' },
+    testing: { id: 'perk_testing', name: 'Testovací režim', description: 'Získejte 4x více peněz a zkušeností každý týden. Šance na událost je také 4x vyšší.', type: 'positive' },
 };
 
 // Modals
@@ -87,6 +88,7 @@ function App() {
   const [isEducationModalOpen, setIsEducationModalOpen] = useState(false);
   const [isHobbiesModalOpen, setIsHobbiesModalOpen] = useState(false);
   const [apiCooldown, setApiCooldown] = useState(false);
+  const isFetchingEvent = useRef(false);
 
   useEffect(() => {
     try {
@@ -152,8 +154,7 @@ function App() {
         skill.level += 1;
         skill.xp = skill.xp - skill.xpToNextLevel;
         skill.xpToNextLevel = Math.floor(skill.xpToNextLevel * 1.5);
-        let happinessGain = 10;
-        if (draft.startingPerk === 'testing') happinessGain *= 2;
+        const happinessGain = 10;
         draft.playerStats.happiness = Math.min(100, draft.playerStats.happiness + happinessGain);
         addLog(`🎉 LEVEL UP! ${skill.name} is now level ${skill.level}.`);
       }
@@ -203,119 +204,111 @@ function App() {
     setGameState(prev => produce(prev, draft => {
       if (draft.gamePhase !== 'playing') return;
 
+      const performSingleWeekUpdate = () => {
+          if (draft.time.week === 52) {
+              draft.gamePhase = 'performance-review';
+              const currentJobIndex = JOB_TIERS.findIndex(j => j.id === draft.currentJob?.id);
+              const promotion = (currentJobIndex !== -1 && currentJobIndex < JOB_TIERS.length - 1) ? JOB_TIERS[currentJobIndex + 1] : null;
+              
+              if(promotion && Object.entries(promotion.skillRequirements).every(([s,l]) => draft.skills[s as keyof GameState['skills']]?.level >= l)) {
+                  draft.performanceReview = { promotionOffer: promotion };
+                  addLog("It's the end of the year! Time for your performance review.");
+              } else {
+                  draft.performanceReview = { promotionOffer: null };
+                  draft.currentJob = null;
+                  addLog("Your yearly contract is up. It's time to find a new position.");
+              }
+              return; // Exit the function
+          }
+
+          draft.time.week += 1;
+        
+          const testingMultiplier = draft.startingPerk === 'testing' ? 4 : 1;
+
+          if (draft.currentHobby) {
+              const hobby = draft.currentHobby;
+              draft.playerStats.money -= hobby.costPerWeek;
+              if (draft.startingPerk !== 'testing') {
+                  draft.playerStats.energy = Math.max(0, draft.playerStats.energy - hobby.energyPerWeek);
+              }
+              if (Math.random() < hobby.luckGainChance) {
+                  draft.playerStats.luck += 1;
+                  addLog(`Your hobby '${hobby.name}' paid off! You feel luckier. (+1 Luck)`);
+              }
+          }
+
+          if(draft.currentJob) {
+              let salary = parseInt(String(draft.currentJob.salary), 10) || 0;
+              let salaryLogMessage = '';
+              if (draft.startingPerk === 'rich') {
+                draft.salaryBonus = Math.random() * 0.75 + 0.25;
+                const bonusAmount = Math.floor(salary * draft.salaryBonus);
+                salary += bonusAmount;
+                salaryLogMessage = ` (+$${bonusAmount.toLocaleString()} bonus)`;
+              }
+              salary *= testingMultiplier;
+              draft.playerStats.money += salary;
+               if (draft.startingPerk === 'testing' && testingMultiplier > 1) {
+                  salaryLogMessage += ` (x${testingMultiplier} Testing Bonus)`;
+              }
+              addLog(`Week ${draft.time.week}, Year ${draft.time.year}: Earned $${salary.toLocaleString()}${salaryLogMessage}.`);
+
+              Object.entries(draft.currentJob.xpGain).forEach(([key, value]) => {
+                const skillKey = key as keyof GameState['skills'];
+                if (draft.skills[skillKey]) {
+                  let xpGained = parseInt(String(value), 10) || 0;
+                  if (draft.startingPerk === 'fortunate') xpGained = Math.floor(xpGained * 0.8);
+                  xpGained *= testingMultiplier;
+                  draft.skills[skillKey].xp += xpGained;
+                }
+              });
+          } else {
+               if (draft.startingPerk === 'testing') {
+                  const stipend = 2000;
+                  draft.playerStats.money += stipend;
+                  addLog(`Week ${draft.time.week}, Year ${draft.time.year}: Received $${stipend} Testing Mode stipend while unemployed.`);
+              } else {
+                  draft.playerStats.money -= 200; // living expenses
+                  addLog(`Week ${draft.time.week}, Year ${draft.time.year}: Paid $200 for living expenses.`);
+              }
+          }
+
+          if (draft.startingPerk !== 'testing') {
+              draft.playerStats.energy = Math.max(0, draft.playerStats.energy - 7);
+              draft.playerStats.happiness = Math.max(0, draft.playerStats.happiness - 1);
+          }
+
+          if (draft.time.week % 13 === 0) updateJobOffers();
+
+          if (!draft.currentEvent && !draft.isGeneratingEvent) {
+              let currentEventChance = EVENT_CHANCE + (draft.playerStats.luck * 0.005);
+              currentEventChance *= testingMultiplier;
+
+              if (Math.random() < currentEventChance) {
+                  if (Math.random() < AI_EVENT_CHANCE_VS_STATIC) {
+                      // AI Event
+                      draft.isGeneratingEvent = true;
+                  } else {
+                      // Static Event
+                      const staticEvent = STATIC_EVENTS[Math.floor(Math.random() * STATIC_EVENTS.length)];
+                      draft.currentEvent = staticEvent;
+                      addLog(`An event has occurred: ${staticEvent.title}`);
+                  }
+              }
+          }
+      };
+
       if (activity) {
-        // Activity week is a single week advance, not affected by testing perk
-        if (draft.time.week === 52) {
-            draft.gamePhase = 'performance-review';
-            const currentJobIndex = JOB_TIERS.findIndex(j => j.id === draft.currentJob?.id);
-            const promotion = (currentJobIndex !== -1 && currentJobIndex < JOB_TIERS.length -1) ? JOB_TIERS[currentJobIndex + 1] : null;
-            if(promotion && Object.entries(promotion.skillRequirements).every(([s,l]) => draft.skills[s as keyof GameState['skills']]?.level >= l)) {
-                draft.performanceReview = { promotionOffer: promotion };
-            } else {
-                draft.performanceReview = { promotionOffer: null };
-                draft.currentJob = null;
-            }
-            addLog("It's time for your performance review.");
-            return;
-        }
+        // Activity week is a single week advance
         draft.time.week += 1;
         draft.playerStats.money -= activity.cost;
         draft.playerStats.energy = Math.min(100, draft.playerStats.energy + activity.effects.energy);
-        let happinessGain = activity.effects.happiness;
-        if (draft.startingPerk === 'testing' && happinessGain > 0) happinessGain *= 2;
+        const happinessGain = activity.effects.happiness;
         draft.playerStats.happiness = Math.min(100, draft.playerStats.happiness + happinessGain);
         addLog(`Week ${draft.time.week}, Year ${draft.time.year}: You spent the week on '${activity.name}'. It was refreshing!`);
       } else {
-        // Normal work week(s)
-        const weeksToAdvance = draft.startingPerk === 'testing' ? 3 : 1;
-        let eventTriggeredThisTurn = false;
-
-        for (let i = 0; i < weeksToAdvance; i++) {
-            if (draft.gamePhase !== 'playing') break;
-
-            if (draft.time.week === 52) {
-                draft.gamePhase = 'performance-review';
-                const currentJobIndex = JOB_TIERS.findIndex(j => j.id === draft.currentJob?.id);
-                const promotion = (currentJobIndex !== -1 && currentJobIndex < JOB_TIERS.length - 1) ? JOB_TIERS[currentJobIndex + 1] : null;
-                
-                if(promotion && Object.entries(promotion.skillRequirements).every(([s,l]) => draft.skills[s as keyof GameState['skills']]?.level >= l)) {
-                    draft.performanceReview = { promotionOffer: promotion };
-                    addLog("It's the end of the year! Time for your performance review.");
-                } else {
-                    draft.performanceReview = { promotionOffer: null };
-                    draft.currentJob = null;
-                    addLog("Your yearly contract is up. It's time to find a new position.");
-                }
-                return; // Exit the loop and the function
-            }
-
-            draft.time.week += 1;
-          
-            if (draft.currentHobby) {
-                const hobby = draft.currentHobby;
-                draft.playerStats.money -= hobby.costPerWeek;
-                if (draft.startingPerk !== 'testing') {
-                    draft.playerStats.energy = Math.max(0, draft.playerStats.energy - hobby.energyPerWeek);
-                }
-                if (Math.random() < hobby.luckGainChance) {
-                    draft.playerStats.luck += 1;
-                    addLog(`Your hobby '${hobby.name}' paid off! You feel luckier. (+1 Luck)`);
-                }
-            }
-
-            if(draft.currentJob) {
-                if (draft.startingPerk === 'testing') {
-                    draft.playerStats.money += 10000;
-                    addLog(`Week ${draft.time.week}, Year ${draft.time.year}: Received $10,000 Testing Mode stipend.`);
-                } else {
-                    let salary = parseInt(String(draft.currentJob.salary), 10) || 0;
-                    let salaryLogMessage = '';
-                    if (draft.startingPerk === 'rich') {
-                      draft.salaryBonus = Math.random() * 0.75 + 0.25;
-                      const bonusAmount = Math.floor(salary * draft.salaryBonus);
-                      salary += bonusAmount;
-                      salaryLogMessage = ` (+$${bonusAmount} bonus)`;
-                    }
-                    draft.playerStats.money += salary;
-                    addLog(`Week ${draft.time.week}, Year ${draft.time.year}: Earned $${salary}${salaryLogMessage}.`);
-                }
-                Object.entries(draft.currentJob.xpGain).forEach(([key, value]) => {
-                  const skillKey = key as keyof GameState['skills'];
-                  if (draft.skills[skillKey]) {
-                    let xpGained = parseInt(String(value), 10) || 0;
-                    if (draft.startingPerk === 'fortunate') xpGained = Math.floor(xpGained * 0.8);
-                    if (draft.startingPerk === 'testing') xpGained *= 5;
-                    draft.skills[skillKey].xp += xpGained;
-                  }
-                });
-            } else {
-                 if (draft.startingPerk === 'testing') {
-                    draft.playerStats.money += 10000;
-                    addLog(`Week ${draft.time.week}, Year ${draft.time.year}: Received $10,000 Testing Mode stipend while unemployed.`);
-                } else {
-                    draft.playerStats.money -= 200; // living expenses
-                    addLog(`Week ${draft.time.week}, Year ${draft.time.year}: Paid $200 for living expenses.`);
-                }
-            }
-
-            if (draft.startingPerk !== 'testing') {
-                draft.playerStats.energy = Math.max(0, draft.playerStats.energy - 7);
-                draft.playerStats.happiness = Math.max(0, draft.playerStats.happiness - 1);
-            }
-
-            if (draft.time.week % 13 === 0) updateJobOffers();
-
-            if (!draft.currentEvent && !draft.isGeneratingEvent && !eventTriggeredThisTurn) {
-                let currentEventChance = EVENT_CHANCE + (draft.playerStats.luck * 0.005);
-                if(draft.startingPerk === 'testing') {
-                    currentEventChance *= 2;
-                }
-                if (Math.random() < currentEventChance) {
-                    draft.isGeneratingEvent = true;
-                    eventTriggeredThisTurn = true;
-                }
-            }
-        }
+        // Normal work week
+        performSingleWeekUpdate();
       }
 
       if (draft.startingPerk === 'happy') draft.playerStats.happiness = Math.max(90, draft.playerStats.happiness);
@@ -364,7 +357,7 @@ function App() {
         const skillToImprove = draft.skills[education.skill];
         if (skillToImprove) {
             let xpGained = education.rewards.xp;
-            if(draft.startingPerk === 'testing') xpGained *= 5;
+            if(draft.startingPerk === 'testing') xpGained *= 4;
             skillToImprove.xp += xpGained;
         }
         if (education.rewards.personalBrand) {
@@ -382,7 +375,8 @@ function App() {
   }, [addLog]);
 
   useEffect(() => {
-    if (gameState.isGeneratingEvent) {
+    if (gameState.isGeneratingEvent && !isFetchingEvent.current) {
+        isFetchingEvent.current = true;
         generateGameEvent(gameState)
             .then(result => {
                 if (result === 'RATE_LIMIT_ERROR') {
@@ -395,6 +389,7 @@ function App() {
                 }
             })
             .finally(() => {
+                isFetchingEvent.current = false;
                 setGameState(prev => produce(prev, draft => { draft.isGeneratingEvent = false; }));
             });
     }
@@ -415,11 +410,7 @@ function App() {
       if(effects.happiness != null) {
           let happinessChange = Number(effects.happiness);
           if (draft.startingPerk === 'testing') {
-              if (happinessChange > 0) {
-                  happinessChange *= 2;
-              } else {
-                  happinessChange = 0;
-              }
+              if (happinessChange < 0) happinessChange = 0;
           }
           draft.playerStats.happiness = Math.max(0, Math.min(100, draft.playerStats.happiness + happinessChange));
       }
@@ -439,7 +430,7 @@ function App() {
       }
       if (effects.xp?.skill && effects.xp.amount != null && draft.skills[effects.xp.skill as keyof GameState['skills']]) {
         let xpGained = Number(effects.xp.amount);
-        if (draft.startingPerk === 'testing') xpGained *= 5;
+        if (draft.startingPerk === 'testing') xpGained *= 4;
         draft.skills[effects.xp.skill as keyof GameState['skills']].xp += xpGained;
       }
       if (effects.addTrait && !draft.activeTraits.some(t => t.id === effects.addTrait?.id)) {

@@ -33,7 +33,7 @@ const perksData = [
   {
     id: 'testing',
     name: 'Testovací režim',
-    description: 'Pro účely testování. Hra běží o 200 % rychleji (3 týdny za kliknutí) a všechny události jsou dvakrát častější.',
+    description: 'Pro účely testování. Každý týden získáváte 4x více peněz a zkušeností a šance na událost je 4x vyšší, což urychluje postup.',
     icon: '🧪',
   },
 ];

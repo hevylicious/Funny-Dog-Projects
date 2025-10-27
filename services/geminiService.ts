@@ -170,16 +170,31 @@ export async function generateGameEvent(gameState: GameState): Promise<GameEvent
   } catch (error: any) {
     console.error('Error generating game event with Gemini:', error);
     
-    // Check for rate limit error in different possible structures
+    // The @google/genai SDK can throw errors in various formats.
+    // To reliably catch rate limit errors, we create a comprehensive string 
+    // to check for specific keywords, regardless of the error's structure.
+    let comprehensiveErrorString = '';
+    if (error && typeof error === 'object') {
+        // Combine the error message and a stringified version of the object for best coverage.
+        comprehensiveErrorString = (error.message || '') + ' ' + JSON.stringify(error);
+    } else {
+        comprehensiveErrorString = String(error);
+    }
+    
+    comprehensiveErrorString = comprehensiveErrorString.toLowerCase();
+    
+    // Keywords that reliably indicate a rate limit issue.
+    if (comprehensiveErrorString.includes('429') || 
+        comprehensiveErrorString.includes('resource_exhausted') ||
+        comprehensiveErrorString.includes('quota')) {
+        return 'RATE_LIMIT_ERROR';
+    }
+    
+    // Also check the specific nested property as a fallback.
     if (error?.error?.status === 'RESOURCE_EXHAUSTED') {
         return 'RATE_LIMIT_ERROR';
     }
 
-    const errorString = (typeof error === 'object' && error !== null ? JSON.stringify(error) : String(error)).toLowerCase();
-    if (errorString.includes('429') || errorString.includes('resource_exhausted') || errorString.includes('quota')) {
-        return 'RATE_LIMIT_ERROR';
-    }
-    
     return null;
   }
 }

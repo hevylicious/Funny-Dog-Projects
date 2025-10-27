@@ -225,6 +225,7 @@ export const EDUCATION_OPTIONS: Education[] = [
 ];
 
 export const EVENT_CHANCE = 0.25; // Increased from 0.20 for more frequent events
+export const AI_EVENT_CHANCE_VS_STATIC = 0.20; // 20% of events will be AI-generated, the rest will be static.
 
 
 export const INITIAL_GAME_STATE: GameState = {
